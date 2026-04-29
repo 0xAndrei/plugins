@@ -1,34 +1,51 @@
+/**
+ * Impersonation Bot Plugin
+ * 
+ * For Kettu / Bunny / Vendetta / Revenge / Equicord
+ * Auto-detects which mod framework is available.
+ * 
+ * Install: https://cdn.jsdelivr.net/gh/0xAndrei/imperso@main/manifest.json
+ */
 
-
-const { findByStoreName, findByProps } = kettu.metro;
-const { after, instead } = kettu.patcher;
-const { showToast } = kettu.ui?.toasts || { showToast: (msg) => console.log(msg) };
-const { storage } = kettu;
+// ==================== FRAMEWORK DETECTION ====================
+// Kettu may expose itself as vendetta, kettu, or bunny
+const framework = window.vendetta || window.kettu || window.bunny || {};
+const metro = framework.metro;
+const patcher = framework.patcher;
+const ui = framework.ui || {};
+const showToast = ui.toasts?.showToast || ui.showToast || ((msg) => console.log("[ImpBot]", msg));
+const storage = framework.storage || framework.settings?.storage || {};
 
 const PLUGIN_ID = "impersonation-bot";
-const log = console.log.bind(console, `[${PLUGIN_ID}]`);
 
-const API_BASE = storage?.apiUrl || "http://192.168.0.52:8080/api";
+// ==================== CONFIG ====================
+const API_BASE = (storage && storage.apiUrl) || "http://192.168.0.52:8080/api";
 const SYNC_INTERVAL = 4000;
 
+// ==================== STATE ====================
 const changes = {
-    edits: new Map(),     
-    names: new Map(),    
+    edits: new Map(),
+    names: new Map(),
 };
 let currentUserId = null;
 let unpatches = [];
 let syncTimer = null;
-let isConnected = false;
 
+function log(...args) {
+    console.log(`[${PLUGIN_ID}]`, ...args);
+}
+
+// ==================== API SYNC ====================
 
 async function syncChanges() {
     if (!currentUserId) {
         try {
-            const UserStore = findByStoreName("UserStore");
+            if (!metro) return;
+            const UserStore = metro.findByStoreName?.("UserStore");
             const user = UserStore?.getCurrentUser?.();
             if (user?.id) {
                 currentUserId = user.id;
-                log("Got user ID:", currentUserId);
+                log("User ID:", currentUserId);
             }
         } catch (e) {}
         return;
@@ -40,181 +57,151 @@ async function syncChanges() {
             headers: { "Accept": "application/json" }
         });
 
-        if (!response.ok) {
-            if (isConnected) {
-                isConnected = false;
-                log("API disconnected");
-            }
-            return;
-        }
-
+        if (!response.ok) return;
         const data = await response.json();
-        isConnected = true;
-
-        let editCount = 0;
-        let nameCount = 0;
 
         if (data.message_edits) {
             for (const edit of data.message_edits) {
                 changes.edits.set(edit.message_id, edit.new_content);
-                editCount++;
             }
         }
         if (data.name_changes) {
             for (const nc of data.name_changes) {
                 changes.names.set(nc.target_user_id, nc.new_name);
-                nameCount++;
             }
         }
-
-        if (editCount > 0 || nameCount > 0) {
-            log(`Synced ${editCount} edits, ${nameCount} names`);
-        }
+        log("Synced:", changes.edits.size, "edits,", changes.names.size, "names");
     } catch (e) {
-        if (isConnected) {
-            isConnected = false;
-            log("API error:", e.message || e);
-        }
+        // Silently fail - API offline is ok
     }
 }
 
+// ==================== MESSAGE PATCHING ====================
 
 function patchMessages() {
     try {
-        const MessageStore = findByStoreName("MessageStore");
+        if (!metro || !patcher) {
+            log("Metro or patcher not available");
+            return;
+        }
+
+        const MessageStore = metro.findByStoreName?.("MessageStore");
+        if (!MessageStore) {
+            log("MessageStore not found");
+            return;
+        }
         
-        if (MessageStore?.getMessage) {
-            const unpatch = instead("getMessage", MessageStore, function(args, orig) {
+        if (MessageStore.getMessage) {
+            const unpatch = patcher.instead("getMessage", MessageStore, function(args, orig) {
                 const msg = orig.apply(this, args);
-                if (!msg?.id) return msg;
+                if (!msg || !msg.id) return msg;
                 
                 const edit = changes.edits.get(msg.id);
                 if (edit) {
-                    // Return modified message without mutating original store
-                    const modified = Object.create(Object.getPrototypeOf(msg));
-                    Object.assign(modified, msg);
-                    modified.content = edit;
-                    modified.editedTimestamp = Date.now();
-                    modified.__impersonationEdited = true;
-                    return modified;
+                    try {
+                        const modified = Object.create(Object.getPrototypeOf(msg));
+                        Object.assign(modified, msg);
+                        modified.content = edit;
+                        modified.editedTimestamp = Date.now();
+                        modified.__impersonationEdited = true;
+                        return modified;
+                    } catch (e) {
+                        return msg;
+                    }
                 }
                 return msg;
             });
             unpatches.push(unpatch);
-            log("Patched MessageStore.getMessage");
+            log("Patched getMessage");
         }
 
-        if (MessageStore?.getMessages) {
-            const unpatch = after("getMessages", MessageStore, (args, res) => {
-                if (!res?._array?.length) return res;
-                
+        if (MessageStore.getMessages) {
+            const unpatch = patcher.after("getMessages", MessageStore, (args, res) => {
+                if (!res || !res._array || !res._array.length) return res;
                 res._array = res._array.map(msg => {
                     const edit = changes.edits.get(msg.id);
                     if (edit && !msg.__impersonationPatched) {
-                        const modified = { ...msg };
-                        modified.content = edit;
-                        modified.editedTimestamp = Date.now();
-                        modified.__impersonationPatched = true;
-                        return modified;
+                        return { 
+                            ...msg, 
+                            content: edit, 
+                            editedTimestamp: Date.now(), 
+                            __impersonationPatched: true 
+                        };
                     }
                     return msg;
                 });
                 return res;
             });
             unpatches.push(unpatch);
-            log("Patched MessageStore.getMessages");
+            log("Patched getMessages");
         }
 
     } catch (e) {
-        log("Message patch error:", e);
+        log("Message patch error:", e.message || e);
     }
 }
 
+// ==================== NAME PATCHING ====================
 
 function patchNames() {
     try {
-        const UserStore = findByStoreName("UserStore");
-        
-        if (UserStore?.getUser) {
-            const unpatch = after("getUser", UserStore, (args, res) => {
-                if (!res?.id) return res;
+        if (!metro || !patcher) return;
+
+        const UserStore = metro.findByStoreName?.("UserStore");
+        if (UserStore && UserStore.getUser) {
+            const unpatch = patcher.after("getUser", UserStore, (args, res) => {
+                if (!res || !res.id) return res;
                 const name = changes.names.get(res.id);
                 if (name) {
-                    return {
-                        ...res,
-                        username: name,
-                        globalName: name,
-                        displayName: name,
-                        __impersonationRenamed: true
-                    };
+                    return { ...res, username: name, globalName: name, displayName: name };
                 }
                 return res;
             });
             unpatches.push(unpatch);
-            log("Patched UserStore.getUser");
+            log("Patched getUser");
         }
 
-        const GuildMemberStore = findByStoreName("GuildMemberStore");
-        if (GuildMemberStore?.getMember) {
-            const unpatch = after("getMember", GuildMemberStore, (args, res) => {
-                if (!res?.userId) return res;
+        const GuildMemberStore = metro.findByStoreName?.("GuildMemberStore");
+        if (GuildMemberStore && GuildMemberStore.getMember) {
+            const unpatch = patcher.after("getMember", GuildMemberStore, (args, res) => {
+                if (!res || !res.userId) return res;
                 const name = changes.names.get(res.userId);
                 if (name) {
-                    return {
-                        ...res,
-                        nick: name,
-                        displayName: name,
-                        __impersonationRenamed: true
-                    };
+                    return { ...res, nick: name, displayName: name };
                 }
                 return res;
             });
             unpatches.push(unpatch);
-            log("Patched GuildMemberStore.getMember");
+            log("Patched getMember");
         }
 
     } catch (e) {
-        log("Name patch error:", e);
+        log("Name patch error:", e.message || e);
     }
 }
 
-
-function patchTimestamp() {
-    try {
-        const Timestamp = findByProps("MessageTimestamp", "default") || findByProps("renderTimestamp");
-        
-        if (Timestamp?.default) {
-            const unpatch = after("default", Timestamp, (args, res) => {
-                const message = args[0]?.message;
-                if ((message?.__impersonationEdited || message?.__impersonationPatched) && res?.props) {
-                }
-                return res;
-            });
-            unpatches.push(unpatch);
-        }
-
-    } catch (e) {
-        log("Timestamp patch error:", e);
-    }
-}
-
+// ==================== LIFECYCLE ====================
 
 export default {
     onLoad() {
-        log("Loading Impersonation Bot plugin...");
+        log("Loading...");
+        log("Framework:", window.vendetta ? "vendetta" : window.kettu ? "kettu" : window.bunny ? "bunny" : "none");
+        log("Metro:", !!metro, "Patcher:", !!patcher);
         log("API:", API_BASE);
 
         setTimeout(() => {
-            patchMessages();
-            patchNames();
-            patchTimestamp();
+            try {
+                patchMessages();
+                patchNames();
 
-            syncChanges();
+                syncChanges();
+                syncTimer = setInterval(syncChanges, SYNC_INTERVAL);
 
-            syncTimer = setInterval(syncChanges, SYNC_INTERVAL);
-
-            showToast?.("Impersonation Bot active");
-            log("Ready - syncing every", SYNC_INTERVAL + "ms");
+                showToast("Impersonation Bot active");
+                log("Ready");
+            } catch (e) {
+                log("Init error:", e.message || e);
+            }
         }, 3000);
     },
 
@@ -222,7 +209,7 @@ export default {
         log("Unloading...");
         if (syncTimer) clearInterval(syncTimer);
         unpatches.forEach(u => {
-            try { u?.(); } catch (e) {}
+            try { u && u(); } catch (e) {}
         });
         unpatches = [];
         changes.edits.clear();
@@ -234,16 +221,7 @@ export default {
             type: "string",
             label: "Bot API URL",
             default: "http://192.168.0.52:8080/api",
-            description: "The IP of the computer running the bot"
+            description: "Your computer's IP with the bot running"
         }
-    },
-
-    // Kettu manifest
-    manifest: {
-        name: "Impersonation Bot",
-        description: "Local message edits, name changes, and impersonations via bot API",
-        author: "Impersonation Bot",
-        version: "1.0.0",
-        color: "#5865f2"
     }
 };
