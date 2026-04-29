@@ -1,28 +1,25 @@
 /**
  * Impersonation Bot Plugin
  * 
- * For Kettu / Bunny / Vendetta / Revenge / Equicord
- * Auto-detects which mod framework is available.
+ * For KettuTweak / Vendetta / Bunny / Revenge
+ * Uses standard @vendetta/* imports.
  * 
- * Install: https://cdn.jsdelivr.net/gh/0xAndrei/imperso@main/manifest.json
+ * Install: https://cdn.jsdelivr.net/gh/0xAndrei/plugins@main/manifest.json
  */
 
-// ==================== FRAMEWORK DETECTION ====================
-// Kettu may expose itself as vendetta, kettu, or bunny
-const framework = window.vendetta || window.kettu || window.bunny || {};
-const metro = framework.metro;
-const patcher = framework.patcher;
-const ui = framework.ui || {};
-const showToast = ui.toasts?.showToast || ui.showToast || ((msg) => console.log("[ImpBot]", msg));
-const storage = framework.storage || framework.settings?.storage || {};
+import { findByStoreName } from "@vendetta/metro";
+import { after, instead } from "@vendetta/patcher";
+import { storage } from "@vendetta/plugin";
+import { showToast } from "@vendetta/ui/toasts";
 
 const PLUGIN_ID = "impersonation-bot";
+const log = (...args) => console.log(`[${PLUGIN_ID}]`, ...args);
 
-// ==================== CONFIG ====================
+
 const API_BASE = (storage && storage.apiUrl) || "http://192.168.0.52:8080/api";
 const SYNC_INTERVAL = 4000;
 
-// ==================== STATE ====================
+/
 const changes = {
     edits: new Map(),
     names: new Map(),
@@ -31,17 +28,12 @@ let currentUserId = null;
 let unpatches = [];
 let syncTimer = null;
 
-function log(...args) {
-    console.log(`[${PLUGIN_ID}]`, ...args);
-}
-
 // ==================== API SYNC ====================
 
 async function syncChanges() {
     if (!currentUserId) {
         try {
-            if (!metro) return;
-            const UserStore = metro.findByStoreName?.("UserStore");
+            const UserStore = findByStoreName("UserStore");
             const user = UserStore?.getCurrentUser?.();
             if (user?.id) {
                 currentUserId = user.id;
@@ -54,7 +46,7 @@ async function syncChanges() {
     try {
         const response = await fetch(`${API_BASE}/changes/${currentUserId}`, {
             method: "GET",
-            headers: { "Accept": "application/json" }
+            headers: { "Accept": "application/json" },
         });
 
         if (!response.ok) return;
@@ -80,22 +72,17 @@ async function syncChanges() {
 
 function patchMessages() {
     try {
-        if (!metro || !patcher) {
-            log("Metro or patcher not available");
-            return;
-        }
-
-        const MessageStore = metro.findByStoreName?.("MessageStore");
+        const MessageStore = findByStoreName("MessageStore");
         if (!MessageStore) {
             log("MessageStore not found");
             return;
         }
-        
+
         if (MessageStore.getMessage) {
-            const unpatch = patcher.instead("getMessage", MessageStore, function(args, orig) {
+            const unpatch = instead("getMessage", MessageStore, function(args, orig) {
                 const msg = orig.apply(this, args);
                 if (!msg || !msg.id) return msg;
-                
+
                 const edit = changes.edits.get(msg.id);
                 if (edit) {
                     try {
@@ -116,16 +103,16 @@ function patchMessages() {
         }
 
         if (MessageStore.getMessages) {
-            const unpatch = patcher.after("getMessages", MessageStore, (args, res) => {
+            const unpatch = after("getMessages", MessageStore, (args, res) => {
                 if (!res || !res._array || !res._array.length) return res;
-                res._array = res._array.map(msg => {
+                res._array = res._array.map((msg) => {
                     const edit = changes.edits.get(msg.id);
                     if (edit && !msg.__impersonationPatched) {
-                        return { 
-                            ...msg, 
-                            content: edit, 
-                            editedTimestamp: Date.now(), 
-                            __impersonationPatched: true 
+                        return {
+                            ...msg,
+                            content: edit,
+                            editedTimestamp: Date.now(),
+                            __impersonationPatched: true,
                         };
                     }
                     return msg;
@@ -135,7 +122,6 @@ function patchMessages() {
             unpatches.push(unpatch);
             log("Patched getMessages");
         }
-
     } catch (e) {
         log("Message patch error:", e.message || e);
     }
@@ -145,11 +131,9 @@ function patchMessages() {
 
 function patchNames() {
     try {
-        if (!metro || !patcher) return;
-
-        const UserStore = metro.findByStoreName?.("UserStore");
+        const UserStore = findByStoreName("UserStore");
         if (UserStore && UserStore.getUser) {
-            const unpatch = patcher.after("getUser", UserStore, (args, res) => {
+            const unpatch = after("getUser", UserStore, (args, res) => {
                 if (!res || !res.id) return res;
                 const name = changes.names.get(res.id);
                 if (name) {
@@ -161,9 +145,9 @@ function patchNames() {
             log("Patched getUser");
         }
 
-        const GuildMemberStore = metro.findByStoreName?.("GuildMemberStore");
+        const GuildMemberStore = findByStoreName("GuildMemberStore");
         if (GuildMemberStore && GuildMemberStore.getMember) {
-            const unpatch = patcher.after("getMember", GuildMemberStore, (args, res) => {
+            const unpatch = after("getMember", GuildMemberStore, (args, res) => {
                 if (!res || !res.userId) return res;
                 const name = changes.names.get(res.userId);
                 if (name) {
@@ -174,7 +158,6 @@ function patchNames() {
             unpatches.push(unpatch);
             log("Patched getMember");
         }
-
     } catch (e) {
         log("Name patch error:", e.message || e);
     }
@@ -185,18 +168,14 @@ function patchNames() {
 export default {
     onLoad() {
         log("Loading...");
-        log("Framework:", window.vendetta ? "vendetta" : window.kettu ? "kettu" : window.bunny ? "bunny" : "none");
-        log("Metro:", !!metro, "Patcher:", !!patcher);
         log("API:", API_BASE);
 
         setTimeout(() => {
             try {
                 patchMessages();
                 patchNames();
-
                 syncChanges();
                 syncTimer = setInterval(syncChanges, SYNC_INTERVAL);
-
                 showToast("Impersonation Bot active");
                 log("Ready");
             } catch (e) {
@@ -208,20 +187,11 @@ export default {
     onUnload() {
         log("Unloading...");
         if (syncTimer) clearInterval(syncTimer);
-        unpatches.forEach(u => {
-            try { u && u(); } catch (e) {}
-        });
+        for (const unpatch of unpatches) {
+            try { unpatch && unpatch(); } catch (e) {}
+        }
         unpatches = [];
         changes.edits.clear();
         changes.names.clear();
     },
-
-    settings: {
-        apiUrl: {
-            type: "string",
-            label: "Bot API URL",
-            default: "http://192.168.0.52:8080/api",
-            description: "Your computer's IP with the bot running"
-        }
-    }
 };
